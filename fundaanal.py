@@ -213,8 +213,9 @@ def render_profit_sales_chart(symbol, hist_df):
 
 def render_stock_chart(symbol):
     st.subheader(f"📈 {symbol} Stock Chart")
+    chart_height = st.slider("chart height", min_value=300, max_value=1200, value=600, step=50, key="tv_height")
     widget_html = f"""
-    <div class="tradingview-widget-container" style="height:520px;width:100%">
+    <div class="tradingview-widget-container" style="height:{chart_height}px;width:100%">
       <div id="tv_chart_{symbol}"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
@@ -237,7 +238,7 @@ def render_stock_chart(symbol):
       </script>
     </div>
     """
-    components.html(widget_html, height=540)
+    components.html(widget_html, height=chart_height + 20)
 
 if st.button("Run Analysis 🔍"):
     if not ticker_input:
