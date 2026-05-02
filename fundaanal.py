@@ -10,7 +10,7 @@ st.header("📊 Fund Analyzer")
 st.subheader("dig into any company's fundamentals, no suit required 😄")
 
 ticker_input = st.text_input("🔍 enter a ticker symbol", placeholder="e.g. AAPL, TSLA, MSFT").upper().strip()
-year_input = st.number_input("📅 year", min_value=2021, max_value=2026, value=2024)
+year_input = datetime.now().year
 
 def fmt(val, prefix="$", suffix=""):
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -158,6 +158,58 @@ def get_chart_data(symbol, period, interval):
         return hist
     return pd.DataFrame()
 
+@st.cache_data(ttl=600)
+def get_historical_income(symbol):
+    t = Ticker(symbol)
+    raw = t.income_statement(frequency='a')
+    if not isinstance(raw, pd.DataFrame) or raw.empty:
+        return pd.DataFrame()
+    df = raw.reset_index()
+    if 'symbol' in df.columns:
+        df = df[df['symbol'] == symbol]
+    if 'periodType' in df.columns:
+        df = df[df['periodType'] == '12M']
+    df['asOfDate'] = pd.to_datetime(df['asOfDate'])
+    df = df.sort_values('asOfDate')
+    df['year'] = df['asOfDate'].dt.year
+    cols = ['year']
+    if 'TotalRevenue' in df.columns:
+        cols.append('TotalRevenue')
+    if 'NetIncome' in df.columns:
+        cols.append('NetIncome')
+    return df[cols].reset_index(drop=True)
+
+def render_profit_sales_chart(symbol, hist_df):
+    if hist_df.empty:
+        st.warning("no historical income data available 😔")
+        return
+    fig = go.Figure()
+    if 'TotalRevenue' in hist_df.columns:
+        fig.add_trace(go.Bar(
+            x=hist_df['year'], y=hist_df['TotalRevenue'],
+            name='Revenue',
+            marker_color='rgba(100,149,237,0.7)',
+        ))
+    if 'NetIncome' in hist_df.columns:
+        fig.add_trace(go.Scatter(
+            x=hist_df['year'], y=hist_df['NetIncome'],
+            name='Net Income',
+            mode='lines+markers',
+            line=dict(color='#00C896', width=2),
+            marker=dict(size=7)
+        ))
+    fig.update_layout(
+        title=dict(text=f"{symbol} — Revenue & Net Income (Annual)", font=dict(size=15)),
+        xaxis=dict(title="Year", showgrid=True, gridcolor='rgba(255,255,255,0.05)', color='white', tickmode='linear'),
+        yaxis=dict(title="USD", showgrid=True, gridcolor='rgba(255,255,255,0.05)', color='white'),
+        plot_bgcolor='#0E1117', paper_bgcolor='#0E1117',
+        font=dict(color='white'),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=350, margin=dict(l=10, r=10, t=50, b=10),
+        barmode='overlay'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
 def render_stock_chart(symbol):
     st.subheader(f"📈 {symbol} Stock Chart")
     col1, col2 = st.columns([3, 1])
@@ -225,6 +277,7 @@ if st.button("Run Analysis 🔍"):
         try:
             with st.spinner(f"give me a sec, im asking yahoo finance nicely about {ticker_input} 🙏"):
                 inc, bal, cf, profile, summary, price_data = get_data(ticker_input, year_input)
+                hist_income = get_historical_income(ticker_input)
 
             st.toast(f"found {ticker_input}! let's see what we're working with 👀")
 
@@ -355,6 +408,10 @@ if st.button("Run Analysis 🔍"):
                 st.code(f"PE Ratio:     {f'{pe_ratio:.2f}' if pe_ratio else 'N/A'}")
                 st.code(f"Stock Price:  {f'${current_price:.2f}' if current_price else 'N/A'}")
                 st.text(description)
+
+                # --- Profit & Sales Chart ---
+                st.subheader("📊 Revenue & Net Income")
+                render_profit_sales_chart(ticker_input, hist_income)
 
                 # --- Balance Sheet ---
                 st.subheader("🏦 Balance Sheet")
