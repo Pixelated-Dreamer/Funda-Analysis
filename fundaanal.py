@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from yahooquery import Ticker
 import pandas as pd
 import plotly.graph_objects as go
@@ -212,63 +213,31 @@ def render_profit_sales_chart(symbol, hist_df):
 
 def render_stock_chart(symbol):
     st.subheader(f"📈 {symbol} Stock Chart")
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        period = st.selectbox("Time Period", ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"], index=2, key="chart_period")
-    interval_map = {
-        "1d": "5m", "5d": "15m", "1mo": "1h",
-        "3mo": "1d", "6mo": "1d", "1y": "1wk",
-        "2y": "1wk", "5y": "1mo"
-    }
-    interval = interval_map[period]
-
-    hist = get_chart_data(symbol, period, interval)
-    if hist.empty:
-        st.error("chart said no 😭 no data available")
-        return
-
-    date_col = 'date' if 'date' in hist.columns else hist.columns[0]
-
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=hist[date_col],
-        open=hist['open'], high=hist['high'],
-        low=hist['low'], close=hist['close'],
-        name="Price",
-        increasing_line_color='#00C896',
-        decreasing_line_color='#FF4B4B'
-    ))
-    fig.add_trace(go.Bar(
-        x=hist[date_col], y=hist['volume'],
-        name='Volume',
-        marker_color='rgba(100,149,237,0.3)',
-        yaxis='y2'
-    ))
-    hist['MA20'] = hist['close'].rolling(window=20).mean()
-    fig.add_trace(go.Scatter(
-        x=hist[date_col], y=hist['MA20'],
-        mode='lines', name='MA20',
-        line=dict(color='orange', width=1.5, dash='dot')
-    ))
-
-    first_close = hist['close'].iloc[0]
-    last_close  = hist['close'].iloc[-1]
-    pct_change  = ((last_close - first_close) / first_close) * 100
-    color = "#00C896" if pct_change >= 0 else "#FF4B4B"
-
-    fig.update_layout(
-        title=dict(text=f"{symbol}  <span style='color:{color}'>{'+' if pct_change >= 0 else ''}{pct_change:.2f}%</span>", font=dict(size=18)),
-        xaxis=dict(rangeslider=dict(visible=False), showgrid=True, gridcolor='rgba(255,255,255,0.05)', color='white'),
-        yaxis=dict(title="Price (USD)", showgrid=True, gridcolor='rgba(255,255,255,0.05)', color='white', side='right'),
-        yaxis2=dict(title="Volume", overlaying='y', side='left', showgrid=False, color='rgba(100,149,237,0.5)'),
-        plot_bgcolor='#0E1117', paper_bgcolor='#0E1117',
-        font=dict(color='white'),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        height=500, margin=dict(l=10, r=10, t=60, b=10)
-    )
-
-    st.plotly_chart(fig, width='stretch')
-    st.caption(f"🕐 last updated: {datetime.now().strftime('%H:%M:%S')} — refreshes every 10 mins (yahoo finance needs its beauty sleep 😴)")
+    widget_html = f"""
+    <div class="tradingview-widget-container" style="height:520px;width:100%">
+      <div id="tv_chart_{symbol}"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget({{
+        "autosize": true,
+        "symbol": "{symbol}",
+        "interval": "D",
+        "timezone": "America/New_York",
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#131722",
+        "enable_publishing": false,
+        "withdateranges": true,
+        "hide_side_toolbar": false,
+        "allow_symbol_change": false,
+        "studies": ["MASimple@tv-basicstudies"],
+        "container_id": "tv_chart_{symbol}"
+      }});
+      </script>
+    </div>
+    """
+    components.html(widget_html, height=540)
 
 if st.button("Run Analysis 🔍"):
     if not ticker_input:
@@ -288,10 +257,18 @@ if st.button("Run Analysis 🔍"):
             description   = prof.get("longBusinessSummary", "no description available, they're mysterious like that 🕵️")
             market_cap    = summ.get("marketCap")
             pe_ratio      = summ.get("trailingPE") or summ.get("forwardPE")
+            peg_ratio     = summ.get("pegRatio")
             current_price = pr.get("regularMarketPrice")
             shares        = (pr.get("sharesOutstanding") or
                              summ.get("sharesOutstanding") or
                              prof.get("sharesOutstanding"))
+
+            revenue_growth = None
+            if not hist_income.empty and 'TotalRevenue' in hist_income.columns and len(hist_income) >= 2:
+                rev_curr = hist_income['TotalRevenue'].iloc[-1]
+                rev_prev = hist_income['TotalRevenue'].iloc[-2]
+                if pd.notna(rev_curr) and pd.notna(rev_prev) and rev_prev != 0:
+                    revenue_growth = (float(rev_curr) - float(rev_prev)) / abs(float(rev_prev)) * 100
 
             if inc is None or bal is None:
                 st.error(f"yeah.. **{ticker_input}** doesn't exist bro 💀 double check the ticker symbol")
@@ -404,9 +381,11 @@ if st.button("Run Analysis 🔍"):
 
                 # --- Quick Stats ---
                 st.subheader("📌 Quick Stats")
-                st.code(f"Market Cap:   {fmt(market_cap)}")
-                st.code(f"PE Ratio:     {f'{pe_ratio:.2f}' if pe_ratio else 'N/A'}")
-                st.code(f"Stock Price:  {f'${current_price:.2f}' if current_price else 'N/A'}")
+                st.code(f"Market Cap:      {fmt(market_cap)}")
+                st.code(f"Stock Price:     {f'${current_price:.2f}' if current_price else 'N/A'}")
+                st.code(f"PE Ratio:        {f'{pe_ratio:.2f}' if pe_ratio else 'N/A'}")
+                st.code(f"PEG Ratio:       {f'{peg_ratio:.2f}' if peg_ratio else 'N/A'}")
+                st.code(f"Revenue Growth:  {f'{revenue_growth:+.1f}%' if revenue_growth is not None else 'N/A'}")
                 st.text(description)
 
                 # --- Profit & Sales Chart ---
@@ -467,8 +446,7 @@ if st.button("Run Analysis 🔍"):
 
             # ---- Chart ----
             st.divider()
-            with st.spinner("loading the chart, almost done i promise 🎨"):
-                render_stock_chart(ticker_input)
+            render_stock_chart(ticker_input)
 
             st.markdown("---")
             st.caption("made with 💜 by Nevaan Kant (xotic)")
