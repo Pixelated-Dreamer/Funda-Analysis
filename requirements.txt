@@ -1,0 +1,5 @@
+streamlit
+yahooquery
+pandas
+plotly
+streamlit-autorefresh
