@@ -5,6 +5,11 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 st.set_page_config(layout="wide")
 st.header("📊 Fund Analyzer")
@@ -240,6 +245,86 @@ def render_stock_chart(symbol):
     """
     components.html(widget_html, height=chart_height + 20)
 
+def run_ai_analysis(ticker: str, metrics: dict, api_key: str) -> str:
+    try:
+        import anthropic
+    except ImportError:
+        return "Install the `anthropic` package to enable AI analysis."
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    def _fmt_m(v, prefix="", suffix="", scale=1.0, decimals=2):
+        if v is None:
+            return "N/A"
+        try:
+            import math
+            fv = float(v) * scale
+            if math.isnan(fv):
+                return "N/A"
+            return f"{prefix}{fv:.{decimals}f}{suffix}"
+        except Exception:
+            return "N/A"
+
+    mc = metrics.get("market_cap")
+    ni = metrics.get("net_income")
+    fcf = metrics.get("fcf")
+
+    prompt = (
+        f"You are a sharp financial analyst. Analyze {ticker} based on the following data and give a concise, opinionated assessment.\n\n"
+        f"Market cap: {'${:.1f}B'.format(mc/1e9) if mc else 'N/A'} | "
+        f"Stock price: {_fmt_m(metrics.get('current_price'), prefix='$')} | "
+        f"PE: {_fmt_m(metrics.get('pe_ratio'), decimals=1)} | "
+        f"PEG: {_fmt_m(metrics.get('peg_ratio'))}\n"
+        f"Revenue: {'${:.1f}B'.format(metrics['revenue']/1e9) if metrics.get('revenue') else 'N/A'} | "
+        f"Net income: {'${:.2f}B'.format(ni/1e9) if ni else 'N/A'} | "
+        f"NI/MC: {_fmt_m((ni/mc*100) if ni and mc and mc>0 else None, suffix='%', decimals=2)}\n"
+        f"FCF: {'${:.2f}B'.format(fcf/1e9) if fcf else 'N/A'} | "
+        f"FCF yield: {_fmt_m((fcf/mc*100) if fcf and mc and mc>0 else None, suffix='%')}\n"
+        f"Profit margin: {_fmt_m(metrics.get('npm'), suffix='%', decimals=1)} | "
+        f"Equity ratio: {_fmt_m(metrics.get('equity_ratio'), suffix='%', decimals=1)} | "
+        f"Revenue growth (YoY): {_fmt_m(metrics.get('revenue_growth'), suffix='%', decimals=1)}\n"
+        f"DCF value/share: {_fmt_m(metrics.get('dcf_value'), prefix='$')} | "
+        f"Current price: {_fmt_m(metrics.get('current_price'), prefix='$')} | "
+        f"Profit growth (YoY): {_fmt_m(metrics.get('growth_rate'), suffix='%', scale=100, decimals=1)}\n"
+        f"Equity score: {metrics.get('score', 'N/A')}/100\n\n"
+        "Write 5–15 lines of flowing analytical prose. No bullet points, no headers. Cover:\n"
+        "- Valuation: is it cheap, fair, or stretched? Use PE, FCF yield, NI/MC as hard anchors\n"
+        "- Business quality: profit margins, equity ratio, growth trajectory\n"
+        "- If fundamentals look weak but the stock trades at a premium, search for the investor narrative driving it\n"
+        "- Give a clear, opinionated overall verdict: overvalued, fairly valued, or undervalued, and why\n"
+        "Use web search to find recent news or catalysts. Be specific, not generic."
+    )
+
+    def _call(use_search: bool) -> str:
+        msgs = [{"role": "user", "content": prompt}]
+        tools = [{"type": "web_search_20250305", "name": "web_search"}] if use_search else []
+        for _ in range(4):
+            kwargs = {"model": "claude-haiku-4-5", "max_tokens": 800, "messages": msgs}
+            if tools:
+                kwargs["tools"] = tools
+            resp = client.messages.create(**kwargs)
+            texts = [b.text for b in resp.content if hasattr(b, "text") and b.text]
+            if resp.stop_reason in ("end_turn", "stop_sequence"):
+                return "\n".join(texts).strip()
+            if resp.stop_reason == "pause_turn":
+                msgs.append({"role": "assistant", "content": resp.content})
+                continue
+            if texts:
+                return "\n".join(texts).strip()
+        return "\n".join([b.text for b in resp.content if hasattr(b, "text") and b.text]).strip()
+
+    try:
+        return _call(use_search=True)
+    except Exception as e:
+        err = str(e)
+        if "web_search" in err.lower() or "400" in err or "422" in err:
+            try:
+                return _call(use_search=False)
+            except Exception as e2:
+                return f"AI analysis failed: {e2}"
+        return f"AI analysis failed: {err}"
+
+
 if st.button("Run Analysis 🔍"):
     if not ticker_input:
         st.warning("bro you forgot to type a ticker 💀")
@@ -372,6 +457,61 @@ if st.button("Run Analysis 🔍"):
             else:
                 st.error("bro this company is struggling. maybe look elsewhere 💀")
 
+            # ---- AI ANALYSIS ----
+            st.markdown("---")
+            st.subheader("🤖 AI Analysis")
+
+            ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not ai_key:
+                try:
+                    ai_key = st.secrets["ANTHROPIC_API_KEY"]
+                except Exception:
+                    pass
+
+            if not ai_key:
+                st.caption("Add `ANTHROPIC_API_KEY` to your environment or Streamlit secrets to enable AI analysis.")
+                ai_key = st.text_input("Anthropic API Key", type="password", key="anth_key_input")
+
+            if ai_key:
+                ai_cache_key = f"ai_{ticker_input}_{year_input}"
+                _, col_refresh = st.columns([10, 1])
+                with col_refresh:
+                    if st.button("↺", key="refresh_ai"):
+                        if ai_cache_key in st.session_state:
+                            del st.session_state[ai_cache_key]
+
+                if ai_cache_key not in st.session_state:
+                    with st.spinner("Claude is researching and analyzing..."):
+                        st.session_state[ai_cache_key] = run_ai_analysis(
+                            ticker_input,
+                            {
+                                "market_cap": market_cap,
+                                "current_price": current_price,
+                                "pe_ratio": pe_ratio,
+                                "peg_ratio": peg_ratio,
+                                "revenue": revenue,
+                                "net_income": net_income,
+                                "fcf": fcf,
+                                "npm": npm,
+                                "equity_ratio": equity_ratio,
+                                "revenue_growth": revenue_growth,
+                                "dcf_value": dcf_value,
+                                "growth_rate": growth_rate,
+                                "score": score,
+                            },
+                            ai_key,
+                        )
+
+                analysis_text = st.session_state[ai_cache_key].replace("\n", "<br>")
+                st.markdown(
+                    f"<div style='background:#1a1a2e;border-left:3px solid #4f8ef7;"
+                    f"padding:16px 20px;border-radius:6px;color:#e0e0e0;"
+                    f"font-size:0.95rem;line-height:1.7;'>"
+                    f"{analysis_text}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
             st.markdown("---")
 
             # ---- 2 COLUMN LAYOUT ----
@@ -448,6 +588,97 @@ if st.button("Run Analysis 🔍"):
             # ---- Chart ----
             st.divider()
             render_stock_chart(ticker_input)
+
+            # ---- TAILWINDS & HEADWINDS ----
+            st.markdown("---")
+            st.subheader("🌬️ Tailwinds & Headwinds")
+
+            tw_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not tw_key:
+                try:
+                    tw_key = st.secrets["ANTHROPIC_API_KEY"]
+                except Exception:
+                    pass
+            if not tw_key and "anth_key_input" in st.session_state:
+                tw_key = st.session_state.get("anth_key_input", "")
+
+            if tw_key:
+                tw_cache_key = f"tw_{ticker_input}_{year_input}"
+                _, tw_col_refresh = st.columns([10, 1])
+                with tw_col_refresh:
+                    if st.button("↺", key="refresh_tw"):
+                        if tw_cache_key in st.session_state:
+                            del st.session_state[tw_cache_key]
+
+                if tw_cache_key not in st.session_state:
+                    with st.spinner("researching tailwinds and headwinds..."):
+                        try:
+                            import anthropic
+                            tw_client = anthropic.Anthropic(api_key=tw_key)
+                            tw_prompt = (
+                                f"You are a financial analyst. For {ticker_input}, identify the key tailwinds (positive forces) "
+                                f"and headwinds (negative forces/risks) affecting the business right now.\n\n"
+                                f"Use web search to find the most current and relevant factors — macro trends, sector dynamics, "
+                                f"competitive pressures, regulatory changes, product cycles, geopolitical exposure, etc.\n\n"
+                                f"Format your response as two clear sections:\n"
+                                f"TAILWINDS: (3–5 specific tailwinds, each 1–2 sentences)\n"
+                                f"HEADWINDS: (3–5 specific headwinds/risks, each 1–2 sentences)\n\n"
+                                f"Be specific and current. No generic filler."
+                            )
+                            tw_msgs = [{"role": "user", "content": tw_prompt}]
+                            tw_tools = [{"type": "web_search_20250305", "name": "web_search"}]
+                            tw_result = ""
+                            for _ in range(4):
+                                tw_kwargs = {"model": "claude-haiku-4-5", "max_tokens": 800, "messages": tw_msgs, "tools": tw_tools}
+                                tw_resp = tw_client.messages.create(**tw_kwargs)
+                                tw_texts = [b.text for b in tw_resp.content if hasattr(b, "text") and b.text]
+                                if tw_resp.stop_reason in ("end_turn", "stop_sequence"):
+                                    tw_result = "\n".join(tw_texts).strip()
+                                    break
+                                if tw_resp.stop_reason == "pause_turn":
+                                    tw_msgs.append({"role": "assistant", "content": tw_resp.content})
+                                    continue
+                                if tw_texts:
+                                    tw_result = "\n".join(tw_texts).strip()
+                                    break
+                            st.session_state[tw_cache_key] = tw_result or "Could not generate tailwinds/headwinds."
+                        except Exception as e_tw:
+                            st.session_state[tw_cache_key] = f"Could not load tailwinds/headwinds: {e_tw}"
+
+                tw_text = st.session_state.get(tw_cache_key, "")
+                if tw_text:
+                    tw_col, hw_col = st.columns(2)
+                    tailwinds_part = ""
+                    headwinds_part = ""
+                    if "HEADWINDS:" in tw_text:
+                        parts = tw_text.split("HEADWINDS:", 1)
+                        tailwinds_part = parts[0].replace("TAILWINDS:", "").strip()
+                        headwinds_part = parts[1].strip()
+                    else:
+                        tailwinds_part = tw_text
+
+                    with tw_col:
+                        st.markdown(
+                            f"<div style='background:#0d1f12;border-left:3px solid #00C896;"
+                            f"padding:14px 18px;border-radius:6px;color:#e0e0e0;"
+                            f"font-size:0.9rem;line-height:1.7;'>"
+                            f"<div style='color:#00C896;font-weight:700;margin-bottom:8px;font-size:1rem;'>Tailwinds</div>"
+                            f"{tailwinds_part.replace(chr(10), '<br>')}"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with hw_col:
+                        st.markdown(
+                            f"<div style='background:#1f0d0d;border-left:3px solid #FF4B4B;"
+                            f"padding:14px 18px;border-radius:6px;color:#e0e0e0;"
+                            f"font-size:0.9rem;line-height:1.7;'>"
+                            f"<div style='color:#FF4B4B;font-weight:700;margin-bottom:8px;font-size:1rem;'>Headwinds</div>"
+                            f"{headwinds_part.replace(chr(10), '<br>')}"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+            else:
+                st.caption("API key required for Tailwinds & Headwinds analysis.")
 
             st.markdown("---")
             st.caption("made with 💜 by Nevaan Kant (xotic)")
